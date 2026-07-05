@@ -15,6 +15,7 @@
 #import "CSROMReceiverView.h"
 
 #import "CSJoystickManager.h"
+#import "CSElectronDebug.h"
 
 #import "NSData+CRC32.h"
 

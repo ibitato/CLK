@@ -125,6 +125,11 @@ public:
 	void end_writing();
 
 	/*!
+		Attempts to update a logical sector directly on formats that support it.
+	*/
+	bool write_sector(Track::Address, uint8_t sector, uint8_t size, const std::vector<uint8_t> &);
+
+	/*!
 		@returns @c true if the drive has received a call to begin_writing but not yet a call to
 		end_writing; @c false otherwise.
 	*/

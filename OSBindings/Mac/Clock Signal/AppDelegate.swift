@@ -10,6 +10,16 @@ import Cocoa
 
 @NSApplicationMain
 class AppDelegate: NSObject, NSApplicationDelegate {
+	private struct FourADLaunchOptions {
+		let mediaURL: URL?
+		let artifactURL: URL?
+		let quitAfterArtifact: Bool
+	}
+
+	private var hasLaunchedFourADCommandLine = false
+	private lazy var fourADLaunchOptions: FourADLaunchOptions? = {
+		return Self.parseFourADLaunchOptions(arguments: ProcessInfo.processInfo.arguments)
+	}()
 
 	func applicationDidFinishLaunching(_ notification: Notification) {
 		// Check for at least one Metal-capable GPU; this check
@@ -24,10 +34,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 			let application = notification.object as! NSApplication
 			application.terminate(self)
 		}
+
+		DispatchQueue.main.async { [weak self] in
+			_ = self?.launchFourADCommandLineIfNeeded()
+		}
 	}
 
 	private var hasShownOpenDocument = false
 	func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+		if launchFourADCommandLineIfNeeded() || fourADLaunchOptions != nil {
+			return false
+		}
+
 		// Decline to show the 'New...' selector by default; the 'Open...'
 		// dialogue has already been shown if this application was started
 		// without a file.
@@ -40,5 +58,112 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 			hasShownOpenDocument = true
 		}
 		return false
+	}
+
+	private static func commandLineValue(_ name: String, arguments: [String]) -> String? {
+		for index in arguments.indices {
+			let argument = arguments[index]
+			if argument == name, index + 1 < arguments.count {
+				return arguments[index + 1]
+			}
+			if argument.hasPrefix(name + "=") {
+				return String(argument.dropFirst(name.count + 1))
+			}
+		}
+		return nil
+	}
+
+	private static func parseFourADLaunchOptions(arguments: [String]) -> FourADLaunchOptions? {
+		guard let machine = commandLineValue("--new", arguments: arguments), machine.lowercased() == "electron" else {
+			return nil
+		}
+
+		var skipNext = false
+		let knownValueArguments = Set([
+			"--new",
+			"--fourad-media",
+			"--fourad-artifact-dir",
+			"--fourad-boot-delay",
+			"--fourad-boot-command",
+			"--fourad-keys",
+		])
+
+		var mediaURL: URL?
+		if let mediaArgument = commandLineValue("--fourad-media", arguments: arguments) {
+			let path = NSString(string: mediaArgument).expandingTildeInPath
+			mediaURL = URL(fileURLWithPath: path)
+		}
+		for argument in arguments.dropFirst() {
+			if skipNext {
+				skipNext = false
+				continue
+			}
+			if knownValueArguments.contains(argument) {
+				skipNext = true
+				continue
+			}
+			if argument.hasPrefix("--") {
+				continue
+			}
+			if mediaURL == nil && (argument.lowercased().hasSuffix(".ssd") || argument.lowercased().hasSuffix(".dsd")) {
+				let path = NSString(string: argument).expandingTildeInPath
+				mediaURL = URL(fileURLWithPath: path)
+			}
+		}
+
+		let artifactArgument = commandLineValue("--fourad-artifact-dir", arguments: arguments)
+		let artifactURL = artifactArgument.map { URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath) }
+		return FourADLaunchOptions(
+			mediaURL: mediaURL,
+			artifactURL: artifactURL,
+			quitAfterArtifact: arguments.contains("--fourad-quit-after-artifact"))
+	}
+
+	private func launchFourADCommandLineIfNeeded() -> Bool {
+		guard !hasLaunchedFourADCommandLine, let options = fourADLaunchOptions else {
+			return false
+		}
+		hasLaunchedFourADCommandLine = true
+		hasShownOpenDocument = true
+
+		writeFourADLaunchState("starting command-line Electron launch", options: options)
+		do {
+			let machineDocument = MachineDocument()
+			NSDocumentController.shared.addDocument(machineDocument)
+			machineDocument.makeWindowControllers()
+			machineDocument.showWindows()
+			let analyser = CSStaticAnalyser(electronDFS: true, adfs: false, ap6: false, sidewaysRAM: false)
+			machineDocument.configureAs(analyser)
+			if let mediaURL = options.mediaURL {
+				machineDocument.insertFourADMedia(mediaURL)
+			}
+			writeFourADLaunchState("created Electron document and queued media", options: options)
+			return true
+		} catch {
+			writeFourADLaunchState("command-line launch failed: \(error)", options: options)
+			if options.quitAfterArtifact {
+				NSApp.terminate(self)
+			}
+			return false
+		}
+	}
+
+	private func writeFourADLaunchState(_ message: String, options: FourADLaunchOptions) {
+		guard let artifactURL = options.artifactURL else {
+			NSLog("4AD: \(message)")
+			return
+		}
+		try? FileManager.default.createDirectory(at: artifactURL, withIntermediateDirectories: true, attributes: nil)
+		let line = "\(Date()): \(message)\n"
+		let logURL = artifactURL.appendingPathComponent("launcher-state.txt")
+		if let data = line.data(using: .utf8) {
+			if FileManager.default.fileExists(atPath: logURL.path), let handle = try? FileHandle(forWritingTo: logURL) {
+				handle.seekToEndOfFile()
+				handle.write(data)
+				handle.closeFile()
+			} else {
+				try? data.write(to: logURL)
+			}
+		}
 	}
 }

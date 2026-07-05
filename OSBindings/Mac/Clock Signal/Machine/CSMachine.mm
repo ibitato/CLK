@@ -20,7 +20,7 @@
 #include "MachineForTarget.hpp"
 #include "StandardOptions.hpp"
 #include "Typer.hpp"
-#include "Activity/Observer.hpp"
+#include "Machines/Acorn/Electron/Electron.hpp"
 
 #include "ClockReceiver/TimeTypes.hpp"
 #include "ClockReceiver/ScanSynchroniser.hpp"
@@ -742,6 +742,95 @@ struct ActivityObserver: public Activity::Observer {
 
 - (CSAppleII *)appleII {
 	return [[CSAppleII alloc] initWithAppleII:_machine->raw_pointer() owner:self];
+}
+
+#pragma mark - Electron debug
+
+- (Electron::Machine *)electronMachine {
+	@synchronized(self) {
+		return dynamic_cast<Electron::Machine *>(static_cast<Electron::Machine *>(_machine->raw_pointer()));
+	}
+}
+
+- (BOOL)electronDebugAvailable {
+	@synchronized(self) {
+		Electron::Machine *electron = [self electronMachine];
+		return electron && electron->debug_available();
+	}
+}
+
+- (NSDictionary<NSString *, id> *)electronDebugSnapshot {
+	@synchronized(self) {
+		Electron::Machine *electron = [self electronMachine];
+		if(!electron || !electron->debug_available()) return nil;
+		const Electron::DebugSnapshot snap = electron->debug_snapshot();
+		NSMutableString *breakpoints = [NSMutableString string];
+		for(const uint16_t address : snap.breakpoints) {
+			[breakpoints appendFormat:@"&%04X\n", address];
+		}
+		if(breakpoints.length == 0) [breakpoints appendString:@"none"];
+		return @{
+			@"pc": @(snap.pc),
+			@"a": @(snap.a),
+			@"x": @(snap.x),
+			@"y": @(snap.y),
+			@"sp": @(snap.sp),
+			@"p": @(snap.p),
+			@"page": @(snap.page),
+			@"top": @(snap.top),
+			@"himem": @(snap.himem),
+			@"freeBytes": @(snap.free_bytes),
+			@"paused": @(snap.paused),
+			@"enabled": @(snap.enabled),
+			@"pauseReason": [NSString stringWithUTF8String:snap.pause_reason.c_str()],
+			@"breakpoints": breakpoints,
+			@"disassembly": [NSString stringWithUTF8String:snap.disassembly.c_str()],
+			@"screenText": [NSString stringWithUTF8String:snap.screen_text.c_str()],
+			@"memoryDump": [NSData dataWithBytes:snap.memory_dump.data() length:snap.memory_dump.size()]
+		};
+	}
+}
+
+- (void)electronDebugSetEnabled:(BOOL)enabled {
+	@synchronized(self) {
+		if(Electron::Machine *electron = [self electronMachine]) electron->debug_set_enabled(enabled);
+	}
+}
+
+- (void)electronDebugContinue {
+	@synchronized(self) {
+		if(Electron::Machine *electron = [self electronMachine]) electron->debug_continue();
+	}
+}
+
+- (void)electronDebugStep {
+	@synchronized(self) {
+		if(Electron::Machine *electron = [self electronMachine]) electron->debug_step();
+	}
+}
+
+- (void)electronDebugPause {
+	@synchronized(self) {
+		if(Electron::Machine *electron = [self electronMachine]) electron->debug_pause();
+	}
+}
+
+- (void)electronDebugAddBreakpoint:(uint16_t)address {
+	@synchronized(self) {
+		if(Electron::Machine *electron = [self electronMachine]) electron->debug_add_breakpoint(address);
+	}
+}
+
+- (void)electronDebugClearBreakpoints {
+	@synchronized(self) {
+		if(Electron::Machine *electron = [self electronMachine]) electron->debug_clear_breakpoints();
+	}
+}
+
+- (void)electronDebugSetTrapBrk:(BOOL)enabled {
+	@synchronized(self) {
+		if(Electron::Machine *electron = [self electronMachine]) electron->debug_set_trap_brk(enabled);
+	}
 }
 
 #pragma mark - Input device queries

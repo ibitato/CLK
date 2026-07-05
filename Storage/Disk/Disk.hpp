@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <vector>
 
 #include "Storage/Storage.hpp"
 #include "Storage/Disk/Track/Track.hpp"
@@ -49,6 +50,14 @@ public:
 		Replaces the Track at position @c position underneath @c head with @c track. Ignored if this disk is read-only.
 	*/
 	virtual void set_track_at_position(Track::Address, const std::shared_ptr<Track> &) = 0;
+
+	/*!
+		Replaces a single logical sector if the underlying disk format can do
+		so without reserialising an entire flux track.
+	*/
+	virtual bool write_sector(Track::Address, uint8_t sector, uint8_t size, const std::vector<uint8_t> &) {
+		return false;
+	}
 
 	/*!
 		Provides a hint that no further tracks are likely to be written for a while.

@@ -57,6 +57,10 @@ public:
 	*/
 	void set_tracks(const std::map<Track::Address, std::unique_ptr<Track>> &) {}
 
+	bool write_sector(Track::Address, uint8_t sector, uint8_t size, const std::vector<uint8_t> &) {
+		return false;
+	}
+
 	/*!
 		Communicates that it is likely to be a while before any more tracks are written.
 	*/
@@ -106,6 +110,7 @@ public:
 	int head_count() const override;
 	Track *track_at_position(Track::Address address) const override;
 	void set_track_at_position(Track::Address address, const std::shared_ptr<Track> &track) override;
+	bool write_sector(Track::Address, uint8_t sector, uint8_t size, const std::vector<uint8_t> &) override;
 	void flush_tracks() override;
 	bool tracks_differ(Track::Address lhs, Track::Address rhs) const override;
 	bool is_read_only() const override;

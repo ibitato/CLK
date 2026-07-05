@@ -13,9 +13,33 @@
 #include "Configurable/StandardOptions.hpp"
 #include "Machines/ROMMachine.hpp"
 
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
+
+namespace Electron::Debug {
+struct Snapshot;
+class Controller;
+}
 
 namespace Electron {
+
+struct DebugSnapshot {
+	uint16_t pc = 0;
+	uint8_t a = 0, x = 0, y = 0, sp = 0, p = 0;
+	uint16_t page = 0, top = 0, himem = 0;
+	int free_bytes = 0;
+	bool paused = false;
+	bool enabled = false;
+	bool trap_brk = true;
+	bool trap_breakpoints = true;
+	std::string pause_reason;
+	std::vector<uint16_t> breakpoints;
+	std::string disassembly;
+	std::string screen_text;
+	std::vector<uint8_t> memory_dump;
+};
 
 /*!
 	@abstract Represents an Acorn Electron.
@@ -25,6 +49,20 @@ namespace Electron {
 */
 struct Machine {
 	virtual ~Machine() = default;
+
+	virtual bool debug_available() const { return false; }
+	virtual DebugSnapshot debug_snapshot() { return {}; }
+	virtual void debug_set_enabled(bool enabled) { (void)enabled; }
+	virtual void debug_continue() {}
+	virtual void debug_step() {}
+	virtual void debug_pause() {}
+	virtual bool debug_add_breakpoint(uint16_t address) { (void)address; return false; }
+	virtual bool debug_remove_breakpoint(uint16_t address) { (void)address; return false; }
+	virtual void debug_clear_breakpoints() {}
+	virtual void debug_set_trap_brk(bool enabled) { (void)enabled; }
+	virtual std::vector<uint8_t> debug_read_memory(uint16_t address, std::size_t length) {
+		(void)address; (void)length; return {};
+	}
 
 	/// Creates and returns an Electron.
 	static std::unique_ptr<Machine> create(const Analyser::Static::Target &, const ROMMachine::ROMFetcher &);

@@ -61,6 +61,23 @@ void DiskImageHolder<T>::set_track_at_position(Track::Address address, const std
 }
 
 template <typename T>
+bool DiskImageHolder<T>::write_sector(
+	Track::Address address,
+	const uint8_t sector,
+	const uint8_t size,
+	const std::vector<uint8_t> &data
+) {
+	if(disk_image_.is_read_only()) return false;
+	if(!disk_image_.write_sector(address, sector, size, data)) return false;
+
+	has_written_ = true;
+	const auto canonical_address = disk_image_.canonical_address(address);
+	unwritten_tracks_.erase(canonical_address);
+	cached_tracks_.erase(canonical_address);
+	return true;
+}
+
+template <typename T>
 Track *DiskImageHolder<T>::track_at_position(Track::Address address) const {
 	if(address.head >= head_count()) return nullptr;
 	if(address.position >= maximum_head_position()) return nullptr;

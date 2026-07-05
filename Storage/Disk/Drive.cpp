@@ -473,6 +473,15 @@ void Drive::end_writing() {
 	}
 }
 
+bool Drive::write_sector(
+	const Track::Address address,
+	const uint8_t sector,
+	const uint8_t size,
+	const std::vector<uint8_t> &data
+) {
+	return disk_ && disk_->write_sector(address, sector, size, data);
+}
+
 bool Drive::is_writing() const {
 	return !is_reading_;
 }

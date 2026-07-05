@@ -129,4 +129,15 @@ typedef NS_ENUM(NSInteger, CSMachineChangeEffect) {
 @property (nonatomic, readonly, nullable) CSZX8081 *zx8081;
 @property (nonatomic, readonly, nullable) CSAppleII *appleII;
 
+// Electron debug (4AD fork).
+@property (nonatomic, readonly) BOOL electronDebugAvailable;
+- (nullable NSDictionary<NSString *, id> *)electronDebugSnapshot;
+- (void)electronDebugSetEnabled:(BOOL)enabled;
+- (void)electronDebugContinue;
+- (void)electronDebugStep;
+- (void)electronDebugPause;
+- (void)electronDebugAddBreakpoint:(uint16_t)address;
+- (void)electronDebugClearBreakpoints;
+- (void)electronDebugSetTrapBrk:(BOOL)enabled;
+
 @end

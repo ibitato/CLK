@@ -77,12 +77,17 @@ void Storage::Disk::decode_sectors(
 	uint8_t sector_size,
 	Storage::Encodings::MFM::Density density
 ) {
+	auto serialisation = Storage::Disk::track_serialisation(
+		track,
+		Storage::Encodings::MFM::bit_length(density)
+	);
+	// A write can place a sector's ID before the index hole and its data after
+	// it. Parse two consecutive revolutions so those sectors remain contiguous.
+	serialisation += serialisation;
+
 	std::map<std::size_t, Storage::Encodings::MFM::Sector> sectors =
 		Storage::Encodings::MFM::sectors_from_segment(
-			Storage::Disk::track_serialisation(
-				track,
-				Storage::Encodings::MFM::bit_length(density)
-			),
+			serialisation,
 			density);
 
 	std::size_t byte_size = size_t(128 << sector_size);
@@ -91,9 +96,10 @@ void Storage::Disk::decode_sectors(
 		if(pair.second.address.sector < first_sector) continue;
 		if(pair.second.size != sector_size) continue;
 		if(pair.second.samples.empty()) continue;
+		if(pair.second.samples[0].size() < byte_size) continue;
 		std::copy_n(
 			pair.second.samples[0].begin(),
-			std::min(pair.second.samples[0].size(), byte_size),
+			byte_size,
 			&destination[(pair.second.address.sector - first_sector) * byte_size]
 		);
 	}

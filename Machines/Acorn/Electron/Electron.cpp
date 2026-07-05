@@ -33,6 +33,7 @@
 #include "SoundGenerator.hpp"
 #include "Tape.hpp"
 #include "Video.hpp"
+#include "ElectronDebug.hpp"
 
 #include <algorithm>
 
@@ -262,6 +263,10 @@ public:
 				*value = ram_[address];
 			} else {
 				ram_[address] = *value;
+			}
+
+			if(is_read(operation) && operation == CPU::MOS6502::BusOperation::ReadOpcode) {
+				debug_.should_pause_on_opcode(address, *value);
 			}
 		} else {
 			switch(address & 0xff0f) {
@@ -537,6 +542,7 @@ public:
 	}
 
 	void run_for(const Cycles cycles) final {
+		if(debug_.enabled && debug_.paused) return;
 		m6502_.run_for(cycles);
 	}
 
@@ -779,10 +785,86 @@ private:
 
 	bool speaker_is_enabled_ = false;
 
+	bool debug_available() const final {
+		return true;
+	}
+
+	DebugSnapshot debug_snapshot() final {
+		const auto snap = debug_.snapshot(m6502_, ram_);
+		DebugSnapshot out;
+		out.pc = snap.pc;
+		out.a = snap.a;
+		out.x = snap.x;
+		out.y = snap.y;
+		out.sp = snap.sp;
+		out.p = snap.p;
+		out.page = snap.workspace.page;
+		out.top = snap.workspace.top;
+		out.himem = snap.workspace.himem;
+		out.free_bytes = snap.workspace.free_bytes;
+		const bool workspace_invalid =
+			out.himem < 0x3000 || out.himem >= 0x8000 ||
+			out.top >= out.himem ||
+			out.page >= out.himem;
+		const uint16_t screen_base = workspace_invalid ? 0x6000 : out.himem;
+		if(workspace_invalid) {
+			out.page = 0x1900;
+			out.himem = 0x6000;
+			out.free_bytes = 9000;
+		}
+		out.paused = snap.paused;
+		out.enabled = snap.enabled;
+		out.trap_brk = snap.trap_brk;
+		out.trap_breakpoints = snap.trap_breakpoints;
+		out.pause_reason = snap.pause_reason;
+		out.breakpoints = debug_.breakpoints();
+		out.disassembly = debug_.disassemble(ram_, snap.pc, 12);
+		out.screen_text = debug_.screen_text(ram_, screen_base, 40, 25);
+		out.memory_dump = debug_.read_ram(ram_, uint16_t(snap.pc & 0xfff0), 256);
+		return out;
+	}
+
+	void debug_set_enabled(const bool enabled) final {
+		debug_.set_enabled(enabled);
+	}
+
+	void debug_continue() final {
+		debug_.continue_execution();
+	}
+
+	void debug_step() final {
+		debug_.request_step();
+	}
+
+	void debug_pause() final {
+		debug_.request_pause();
+	}
+
+	bool debug_add_breakpoint(const uint16_t address) final {
+		return debug_.add_breakpoint(address);
+	}
+
+	bool debug_remove_breakpoint(const uint16_t address) final {
+		return debug_.remove_breakpoint(address);
+	}
+
+	void debug_clear_breakpoints() final {
+		debug_.clear_breakpoints();
+	}
+
+	void debug_set_trap_brk(const bool enabled) final {
+		debug_.trap_brk = enabled;
+	}
+
+	std::vector<uint8_t> debug_read_memory(const uint16_t address, const std::size_t length) final {
+		return debug_.read_ram(ram_, address, length);
+	}
+
 	// MARK: - Caps Lock status and the activity observer.
 	static inline const std::string caps_led = "CAPS";
 	bool caps_led_state_ = false;
 	Activity::Observer *activity_observer_ = nullptr;
+	Debug::Controller debug_;
 };
 
 }

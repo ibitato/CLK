@@ -587,6 +587,8 @@ void WD1770::posit_event(const int new_event_type) {
 
 		WAIT_FOR_EVENT(Event::DataWritten);
 		distance_into_section_ = 0;
+		write_sector_buffer_.clear();
+		write_sector_buffer_.reserve(size_t(128 << (header_[3]&3)));
 
 	type2_write_loop:
 		/*
@@ -598,6 +600,7 @@ void WD1770::posit_event(const int new_event_type) {
 			documentation error.
 		*/
 		write_byte(data_);
+		write_sector_buffer_.push_back(data_);
 		distance_into_section_++;
 		if(distance_into_section_ == 128 << (header_[3]&3)) {
 			goto type2_write_crc;
@@ -622,6 +625,11 @@ void WD1770::posit_event(const int new_event_type) {
 		write_byte(0xff);
 		WAIT_FOR_EVENT(Event::DataWritten);
 		end_writing();
+		get_drive().write_sector(
+			Storage::Disk::Track::Address(header_[1], Storage::Disk::HeadPosition(header_[0])),
+			header_[2],
+			header_[3],
+			write_sector_buffer_);
 
 		if(command_ & 0x10) {
 			sector_++;

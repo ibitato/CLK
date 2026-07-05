@@ -11,6 +11,7 @@
 #include "Storage/Disk/Controller/MFMDiskController.hpp"
 
 #include <concepts>
+#include <vector>
 
 namespace WD {
 
@@ -114,6 +115,7 @@ private:
 	int distance_into_section_;
 
 	int step_direction_;
+	std::vector<uint8_t> write_sector_buffer_;
 
 	template <typename FuncT>
 	requires std::invocable<FuncT, Status &>

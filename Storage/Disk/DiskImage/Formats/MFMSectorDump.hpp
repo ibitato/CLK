@@ -27,6 +27,7 @@ public:
 	bool represents(const std::string &) const;
 	void set_tracks(const std::map<Track::Address, std::unique_ptr<Track>> &tracks);
 	std::unique_ptr<Track> track_at_position(Track::Address) const;
+	bool write_sector(Track::Address, uint8_t sector, uint8_t size, const std::vector<uint8_t> &);
 
 protected:
 	mutable Storage::FileHolder file_;

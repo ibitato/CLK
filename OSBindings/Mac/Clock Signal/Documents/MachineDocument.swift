@@ -34,6 +34,20 @@ class MachineDocument:
 	/// The active machine, following its successful creation.
 	private var machine: CSMachine!
 
+	private struct FourADArtifactOptions {
+		let directory: URL
+		let bootDelay: TimeInterval
+		let bootCommand: String?
+		let keys: [String]
+		let quitAfterArtifact: Bool
+	}
+
+	private lazy var fourADArtifactOptions: FourADArtifactOptions? = {
+		return Self.parseFourADArtifactOptions(arguments: ProcessInfo.processInfo.arguments)
+	}()
+	private var fourADArtifactScheduled = false
+	private var pendingFourADMediaURL: URL?
+
 	/// @returns the appropriate window content aspect ratio for this @c self.machine.
 	private var aspectRatio: NSSize {
 		get {
@@ -272,9 +286,198 @@ class MachineDocument:
 			scanTargetView.window!.makeKeyAndOrderFront(self)
 			scanTargetView.window!.makeFirstResponder(scanTargetView)
 
+			// Insert command-line media before start so autoboot sees it.
+			applyPendingFourADMediaIfNeeded()
 			// Start forwarding best-effort updates.
 			machine.start()
+			scheduleFourADArtifactExportIfNeeded()
 			optionsFader?.showTransiently(for: 1.0)
+		}
+	}
+
+	private static func fourADArgumentValue(_ name: String, arguments: [String]) -> String? {
+		for index in arguments.indices {
+			let argument = arguments[index]
+			if argument == name, index + 1 < arguments.count {
+				return arguments[index + 1]
+			}
+			if argument.hasPrefix(name + "=") {
+				return String(argument.dropFirst(name.count + 1))
+			}
+		}
+		return nil
+	}
+
+	private static func parseFourADArtifactOptions(arguments: [String]) -> FourADArtifactOptions? {
+		guard let directoryArgument = fourADArgumentValue("--fourad-artifact-dir", arguments: arguments) else {
+			return nil
+		}
+
+		let directoryPath = NSString(string: directoryArgument).expandingTildeInPath
+		let bootDelayArgument = fourADArgumentValue("--fourad-boot-delay", arguments: arguments)
+		let bootDelay = TimeInterval(bootDelayArgument ?? "") ?? 10.0
+		let bootCommand = fourADArgumentValue("--fourad-boot-command", arguments: arguments)
+		let keysArgument = fourADArgumentValue("--fourad-keys", arguments: arguments) ?? ""
+		let keys = keysArgument.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+
+		return FourADArtifactOptions(
+			directory: URL(fileURLWithPath: directoryPath),
+			bootDelay: bootDelay,
+			bootCommand: bootCommand,
+			keys: keys,
+			quitAfterArtifact: arguments.contains("--fourad-quit-after-artifact"))
+	}
+
+	private func scheduleFourADArtifactExportIfNeeded() {
+		guard !fourADArtifactScheduled, let options = fourADArtifactOptions else {
+			return
+		}
+		fourADArtifactScheduled = true
+		writeFourADArtifactState("scheduled export after \(options.bootDelay)s", to: options.directory)
+
+		if let bootCommand = options.bootCommand {
+			DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+				self?.writeFourADArtifactState("typing boot command", to: options.directory)
+				self?.machine.paste(bootCommand)
+			}
+		}
+
+		DispatchQueue.main.asyncAfter(deadline: .now() + options.bootDelay) { [weak self] in
+			self?.writeFourADArtifactState("starting export", to: options.directory)
+			self?.exportFourADArtifacts(options: options)
+		}
+	}
+
+	private func exportFourADArtifacts(options: FourADArtifactOptions) {
+		do {
+			try FileManager.default.createDirectory(at: options.directory, withIntermediateDirectories: true, attributes: nil)
+			try exportFourADSnapshot(
+				to: options.directory,
+				screenshotName: "screen.png",
+				debugName: "debug.json",
+				textName: "screen-text.txt")
+			writeFourADArtifactState("wrote initial snapshot", to: options.directory)
+
+			if options.keys.isEmpty {
+				if options.quitAfterArtifact {
+					NSApp.terminate(self)
+				}
+				return
+			}
+
+			sendFourADKeys(options.keys)
+			let afterKeysDelay = max(10.0, Double(options.keys.count) * 0.8 + 1.5)
+			DispatchQueue.main.asyncAfter(deadline: .now() + afterKeysDelay) { [weak self] in
+				guard let self = self else { return }
+				do {
+					self.writeFourADArtifactState("starting after-keys export", to: options.directory)
+					try self.exportFourADSnapshot(
+						to: options.directory,
+						screenshotName: "after-keys.png",
+						debugName: "after-keys-debug.json",
+						textName: "after-keys-screen-text.txt")
+					self.writeFourADArtifactState("wrote after-keys snapshot", to: options.directory)
+				} catch {
+					self.writeFourADExportError(error, to: options.directory)
+				}
+				if options.quitAfterArtifact {
+					NSApp.terminate(self)
+				}
+			}
+		} catch {
+			writeFourADExportError(error, to: options.directory)
+			if options.quitAfterArtifact {
+				NSApp.terminate(self)
+			}
+		}
+	}
+
+	private func sendFourADKeys(_ keys: [String]) {
+		machine.inputMode = .keyboardLogical
+		for (index, key) in keys.enumerated() {
+			guard let keyInfo = fourADKeyInfo(for: key) else {
+				continue
+			}
+			let baseDelay = 0.5 + Double(index) * 0.7
+			DispatchQueue.main.asyncAfter(deadline: .now() + baseDelay) { [weak self] in
+				self?.writeFourADArtifactState("key down \(key)", to: self?.fourADArtifactOptions?.directory ?? URL(fileURLWithPath: "/tmp"))
+				self?.machine.setKey(keyInfo.keyCode, characters: keyInfo.characters, isPressed: true, isRepeat: false)
+			}
+			DispatchQueue.main.asyncAfter(deadline: .now() + baseDelay + 0.35) { [weak self] in
+				self?.writeFourADArtifactState("key up \(key)", to: self?.fourADArtifactOptions?.directory ?? URL(fileURLWithPath: "/tmp"))
+				self?.machine.setKey(keyInfo.keyCode, characters: keyInfo.characters, isPressed: false, isRepeat: false)
+			}
+		}
+	}
+
+	private func fourADKeyInfo(for key: String) -> (keyCode: UInt16, characters: String)? {
+		switch key.lowercased() {
+			case "w": return (UInt16(VK_ANSI_W), "w")
+			case "a": return (UInt16(VK_ANSI_A), "a")
+			case "s": return (UInt16(VK_ANSI_S), "s")
+			case "d": return (UInt16(VK_ANSI_D), "d")
+			case "r": return (UInt16(VK_ANSI_R), "r")
+			case "m": return (UInt16(VK_ANSI_M), "m")
+			case "g": return (UInt16(VK_ANSI_G), "g")
+			case "f": return (UInt16(VK_ANSI_F), "f")
+			case "l": return (UInt16(VK_ANSI_L), "l")
+			case "q": return (UInt16(VK_ANSI_Q), "q")
+			case "1": return (UInt16(VK_ANSI_1), "1")
+			case "2": return (UInt16(VK_ANSI_2), "2")
+			case "3": return (UInt16(VK_ANSI_3), "3")
+			default: return nil
+		}
+	}
+
+	private func exportFourADSnapshot(to directory: URL, screenshotName: String, debugName: String, textName: String) throws {
+		let imageRepresentation = self.machine.imageRepresentation
+		guard let pngData = imageRepresentation.representation(using: .png, properties: [:]) else {
+			throw NSError(domain: "FourADArtifactExport", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not encode PNG screenshot"])
+		}
+		try pngData.write(to: directory.appendingPathComponent(screenshotName))
+
+		let rawSnapshot = self.machine.electronDebugSnapshot() as? [String: Any]
+		let snapshot = sanitizeFourADSnapshot(rawSnapshot ?? ["error": "Electron debug snapshot unavailable"])
+		let jsonData = try JSONSerialization.data(withJSONObject: snapshot, options: [.prettyPrinted])
+		try jsonData.write(to: directory.appendingPathComponent(debugName))
+
+		if let screenText = snapshot["screenText"] as? String {
+			try (screenText + "\n").write(to: directory.appendingPathComponent(textName), atomically: true, encoding: .utf8)
+		}
+	}
+
+	private func sanitizeFourADSnapshot(_ snapshot: [String: Any]) -> [String: Any] {
+		var sanitized: [String: Any] = [:]
+		for (key, value) in snapshot {
+			if let data = value as? Data {
+				sanitized[key + "Base64"] = data.base64EncodedString()
+				sanitized[key + "Bytes"] = data.count
+			} else if JSONSerialization.isValidJSONObject([key: value]) {
+				sanitized[key] = value
+			} else {
+				sanitized[key] = String(describing: value)
+			}
+		}
+		return sanitized
+	}
+
+	private func writeFourADExportError(_ error: Error, to directory: URL) {
+		let message = String(describing: error) + "\n"
+		try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+		try? message.write(to: directory.appendingPathComponent("capture-error.txt"), atomically: true, encoding: .utf8)
+	}
+
+	private func writeFourADArtifactState(_ message: String, to directory: URL) {
+		try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+		let line = "\(Date()): \(message)\n"
+		let logURL = directory.appendingPathComponent("artifact-state.txt")
+		guard let data = line.data(using: .utf8) else { return }
+		if FileManager.default.fileExists(atPath: logURL.path), let handle = try? FileHandle(forWritingTo: logURL) {
+			handle.seekToEndOfFile()
+			handle.write(data)
+			handle.closeFile()
+		} else {
+			try? data.write(to: logURL)
 		}
 	}
 
@@ -362,6 +565,23 @@ class MachineDocument:
 		}
 	}
 
+	func insertFourADMedia(_ URL: URL) {
+		pendingFourADMediaURL = URL
+		applyPendingFourADMediaIfNeeded()
+	}
+
+	private func applyPendingFourADMediaIfNeeded() {
+		guard let URL = pendingFourADMediaURL, self.machine != nil else {
+			return
+		}
+		let mediaSet = CSMediaSet(fileAt: URL)
+		checkPermisions(mediaSet)
+		if !mediaSet.empty {
+			mediaSet.apply(to: self.machine)
+			pendingFourADMediaURL = nil
+		}
+	}
+
 	private func checkPermisions(_ mediaSet: CSMediaSet) {
 		mediaSet.addPermissionHandler()
 	}
@@ -392,10 +612,25 @@ class MachineDocument:
 
 	/// Forwards key down events directly to the machine.
 	func keyDown(_ event: NSEvent) {
+		if event.modifierFlags.contains([.command, .shift]) && event.charactersIgnoringModifiers?.lowercased() == "d" {
+			showElectronDebugPanel()
+			return
+		}
 		guard let machine = self.machine else {
 			return
 		}
 		machine.setKey(event.keyCode, characters: event.characters, isPressed: true, isRepeat: event.isARepeat)
+	}
+
+	private var electronDebugPanel: CSElectronDebugPanel?
+
+	func showElectronDebugPanel() {
+		guard let machine = self.machine else { return }
+		guard CSElectronDebugPanel.isAvailable(for: machine) else { return }
+		if electronDebugPanel == nil {
+			electronDebugPanel = CSElectronDebugPanel(machine: machine)
+		}
+		electronDebugPanel?.openDebugWindow()
 	}
 
 	/// Forwards key up events directly to the machine.

@@ -10,6 +10,8 @@
 
 #include "Storage/Disk/DiskImage/Formats/Utility/ImplicitSectors.hpp"
 
+#include <algorithm>
+
 using namespace Storage::Disk;
 
 MFMSectorDump::MFMSectorDump(const std::string &file_name) : file_(file_name) {}
@@ -56,12 +58,24 @@ std::unique_ptr<Track> MFMSectorDump::track_at_position(const Track::Address add
 
 void MFMSectorDump::set_tracks(const std::map<Track::Address, std::unique_ptr<Track>> &tracks) {
 	const auto size = size_t((128 << sector_size_) * sectors_per_track_);
-	std::vector<uint8_t> parsed_track(size);
 
 	// TODO: it would be more efficient from a file access and locking point of view to parse the sectors
 	// in one loop, then write in another.
 
 	for(const auto &track : tracks) {
+		const long file_offset = get_file_offset_for_position(track.first);
+		std::vector<uint8_t> parsed_track(size, 0);
+
+		{
+			std::lock_guard lock_guard(file_.file_access_mutex());
+			file_.ensure_is_at_least_length(file_offset + long(size));
+			file_.seek(file_offset, Whence::SET);
+			const auto bytes_read = file_.read(parsed_track.data(), size);
+			if(bytes_read < size) {
+				std::fill(parsed_track.begin() + std::ptrdiff_t(bytes_read), parsed_track.end(), 0);
+			}
+		}
+
 		decode_sectors(
 			*track.second,
 			parsed_track.data(),
@@ -69,14 +83,40 @@ void MFMSectorDump::set_tracks(const std::map<Track::Address, std::unique_ptr<Tr
 			first_sector_ + uint8_t(sectors_per_track_-1),
 			sector_size_,
 			density_);
-		const long file_offset = get_file_offset_for_position(track.first);
 
 		std::lock_guard lock_guard(file_.file_access_mutex());
-		file_.ensure_is_at_least_length(file_offset);
+		file_.ensure_is_at_least_length(file_offset + long(size));
 		file_.seek(file_offset, Whence::SET);
 		file_.write(parsed_track);
 	}
 	file_.flush();
+}
+
+bool MFMSectorDump::write_sector(
+	const Track::Address address,
+	const uint8_t sector,
+	const uint8_t size,
+	const std::vector<uint8_t> &data
+) {
+	if(address.head >= head_count()) return false;
+	if(address.position.as_largest() >= maximum_head_position().as_largest()) return false;
+	if(size != sector_size_) return false;
+	if(sector < first_sector_) return false;
+	if(sector >= first_sector_ + uint8_t(sectors_per_track_)) return false;
+
+	const auto byte_size = size_t(128 << sector_size_);
+	if(data.size() < byte_size) return false;
+
+	const long file_offset = get_file_offset_for_position(address) +
+		long((sector - first_sector_) * byte_size);
+	std::vector<uint8_t> sector_data(data.begin(), data.begin() + std::ptrdiff_t(byte_size));
+
+	std::lock_guard lock_guard(file_.file_access_mutex());
+	file_.ensure_is_at_least_length(file_offset + long(byte_size));
+	file_.seek(file_offset, Whence::SET);
+	file_.write(sector_data);
+	file_.flush();
+	return true;
 }
 
 bool MFMSectorDump::is_read_only() const {
