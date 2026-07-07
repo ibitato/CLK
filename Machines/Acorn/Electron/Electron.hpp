@@ -39,6 +39,10 @@ struct DebugSnapshot {
 	std::string disassembly;
 	std::string screen_text;
 	std::vector<uint8_t> memory_dump;
+	std::string basic_error;
+	int32_t resident_H = 0, resident_I = 0, resident_J = 0, resident_K = 0;
+	int32_t resident_L = 0, resident_M = 0, resident_N = 0, resident_O = 0;
+	int32_t resident_P = 0, resident_Q = 0, resident_R = 0, resident_S = 0;
 };
 
 /*!

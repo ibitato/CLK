@@ -9,6 +9,18 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/// 4AD: project ROMImages root (--fourad-rom-path), checked before bundle/support dirs.
+void CSSetFourADROMImagesRoot(NSString *_Nullable path);
+NSString *_Nullable CSFourADROMImagesRoot(void);
+
+#ifdef __cplusplus
+}
+#endif
+
 @interface CSElectronDebugPanel : NSWindowController
 
 + (BOOL)isAvailableForMachine:(CSMachine *)machine;

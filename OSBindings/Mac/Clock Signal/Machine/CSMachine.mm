@@ -786,6 +786,22 @@ struct ActivityObserver: public Activity::Observer {
 			@"breakpoints": breakpoints,
 			@"disassembly": [NSString stringWithUTF8String:snap.disassembly.c_str()],
 			@"screenText": [NSString stringWithUTF8String:snap.screen_text.c_str()],
+			@"basicError": snap.basic_error.empty() ? @"" : [NSString stringWithUTF8String:snap.basic_error.c_str()],
+			@"resident": @{
+				@"H": @(snap.resident_H),
+				@"I": @(snap.resident_I),
+				@"J": @(snap.resident_J),
+				@"K": @(snap.resident_K),
+				@"L": @(snap.resident_L),
+				@"M": @(snap.resident_M),
+				@"N": @(snap.resident_N),
+				@"O": @(snap.resident_O),
+				@"P": @(snap.resident_P),
+				@"Q": @(snap.resident_Q),
+				@"R": @(snap.resident_R),
+				@"S": @(snap.resident_S),
+			},
+			@"hopCount": @(snap.resident_H),
 			@"memoryDump": [NSData dataWithBytes:snap.memory_dump.data() length:snap.memory_dump.size()]
 		};
 	}

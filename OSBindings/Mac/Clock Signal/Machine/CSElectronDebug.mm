@@ -8,6 +8,24 @@
 
 #include "Machines/Acorn/Electron/Electron.hpp"
 
+static NSString *FourADROMImagesRoot = nil;
+
+extern "C" {
+
+void CSSetFourADROMImagesRoot(NSString *path) {
+	if(path.length == 0) {
+		FourADROMImagesRoot = nil;
+		return;
+	}
+	FourADROMImagesRoot = [path copy];
+}
+
+NSString *CSFourADROMImagesRoot(void) {
+	return FourADROMImagesRoot;
+}
+
+} // extern "C"
+
 @interface CSElectronDebugPanel ()
 @property(nonatomic, weak) CSMachine *machine;
 @property(nonatomic, strong) NSTextView *registersView;

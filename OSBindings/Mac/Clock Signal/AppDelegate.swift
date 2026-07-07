@@ -22,6 +22,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 	}()
 
 	func applicationDidFinishLaunching(_ notification: Notification) {
+		if let romPath = Self.commandLineValue("--fourad-rom-path", arguments: ProcessInfo.processInfo.arguments) {
+			let expanded = NSString(string: romPath).expandingTildeInPath
+			CSSetFourADROMImagesRoot(expanded)
+		}
+
 		// Check for at least one Metal-capable GPU; this check
 		// will become unnecessary if/when the minimum OS version
 		// that this project supports reascends to 10.14.
@@ -41,6 +46,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 	}
 
 	private var hasShownOpenDocument = false
+	func applicationShouldRestoreApplicationState(_ app: NSApplication) -> Bool {
+		return fourADLaunchOptions == nil
+	}
+
+	func applicationShouldSaveApplicationState(_ app: NSApplication) -> Bool {
+		return fourADLaunchOptions == nil
+	}
+
 	func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
 		if launchFourADCommandLineIfNeeded() || fourADLaunchOptions != nil {
 			return false
@@ -73,8 +86,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		return nil
 	}
 
+	private static func hasFourADArgument(_ arguments: [String]) -> Bool {
+		arguments.contains { argument in
+			argument == "--fourad-fail-fast" ||
+			argument == "--fourad-disk-snapshot" ||
+			argument == "--fourad-quit-after-artifact" ||
+			argument.hasPrefix("--fourad-")
+		}
+	}
+
 	private static func parseFourADLaunchOptions(arguments: [String]) -> FourADLaunchOptions? {
-		guard let machine = commandLineValue("--new", arguments: arguments), machine.lowercased() == "electron" else {
+		let hasFourADArguments = hasFourADArgument(arguments)
+		if let machine = commandLineValue("--new", arguments: arguments), machine.lowercased() != "electron" {
+			return nil
+		}
+		guard hasFourADArguments || commandLineValue("--new", arguments: arguments)?.lowercased() == "electron" else {
 			return nil
 		}
 
@@ -86,6 +112,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 			"--fourad-boot-delay",
 			"--fourad-boot-command",
 			"--fourad-keys",
+			"--fourad-script",
+			"--fourad-rom-path",
 		])
 
 		var mediaURL: URL?
@@ -144,7 +172,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 			if options.quitAfterArtifact {
 				NSApp.terminate(self)
 			}
-			return false
+			return true
 		}
 	}
 

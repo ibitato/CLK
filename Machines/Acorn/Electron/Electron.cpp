@@ -820,6 +820,19 @@ private:
 		out.breakpoints = debug_.breakpoints();
 		out.disassembly = debug_.disassemble(ram_, snap.pc, 12);
 		out.screen_text = debug_.screen_text(ram_, screen_base, 40, 25);
+		out.basic_error = debug_.find_basic_error(out.screen_text);
+		out.resident_H = debug_.read_resident_int(ram_, 'H');
+		out.resident_I = debug_.read_resident_int(ram_, 'I');
+		out.resident_J = debug_.read_resident_int(ram_, 'J');
+		out.resident_K = debug_.read_resident_int(ram_, 'K');
+		out.resident_L = debug_.read_resident_int(ram_, 'L');
+		out.resident_M = debug_.read_resident_int(ram_, 'M');
+		out.resident_N = debug_.read_resident_int(ram_, 'N');
+		out.resident_O = debug_.read_resident_int(ram_, 'O');
+		out.resident_P = debug_.read_resident_int(ram_, 'P');
+		out.resident_Q = debug_.read_resident_int(ram_, 'Q');
+		out.resident_R = debug_.read_resident_int(ram_, 'R');
+		out.resident_S = debug_.read_resident_int(ram_, 'S');
 		out.memory_dump = debug_.read_ram(ram_, uint16_t(snap.pc & 0xfff0), 256);
 		return out;
 	}

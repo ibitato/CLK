@@ -39,14 +39,41 @@ class MachineDocument:
 		let bootDelay: TimeInterval
 		let bootCommand: String?
 		let keys: [String]
+		let scriptSteps: [FourADScriptStep]
 		let quitAfterArtifact: Bool
+		let failFast: Bool
+		let diskSnapshot: Bool
 	}
+
+	private struct FourADScriptStep {
+		let action: String
+		let name: String
+		let key: String?
+		let text: String?
+		let delay: TimeInterval
+		let timeout: TimeInterval
+		let snapshot: String?
+		let expect: [String: Any]
+	}
+
+	private lazy var fourADAutoBoot: Bool = {
+		ProcessInfo.processInfo.arguments.contains("--fourad-auto-boot")
+	}()
+
+	private lazy var fourADInteractiveBootCommand: String? = {
+		Self.fourADArgumentValue("--fourad-boot-command", arguments: ProcessInfo.processInfo.arguments)
+	}()
+
+	private var fourADFailFastTimer: Timer?
 
 	private lazy var fourADArtifactOptions: FourADArtifactOptions? = {
 		return Self.parseFourADArtifactOptions(arguments: ProcessInfo.processInfo.arguments)
 	}()
 	private var fourADArtifactScheduled = false
 	private var pendingFourADMediaURL: URL?
+	private var fourADAutomationStepIndex = -1
+	private var fourADAutomationStepName = ""
+	private var fourADAutomationLastResult = ""
 
 	/// @returns the appropriate window content aspect ratio for this @c self.machine.
 	private var aspectRatio: NSSize {
@@ -288,9 +315,11 @@ class MachineDocument:
 
 			// Insert command-line media before start so autoboot sees it.
 			applyPendingFourADMediaIfNeeded()
+			scheduleFourADInteractiveBootIfNeeded()
 			// Start forwarding best-effort updates.
 			machine.start()
 			scheduleFourADArtifactExportIfNeeded()
+			scheduleFourADFailFastIfNeeded()
 			optionsFader?.showTransiently(for: 1.0)
 		}
 	}
@@ -308,6 +337,49 @@ class MachineDocument:
 		return nil
 	}
 
+	private static func parseFourADScriptSteps(_ argument: String?) -> [FourADScriptStep] {
+		guard let argument = argument, !argument.isEmpty else {
+			return []
+		}
+
+		let expanded = NSString(string: argument).expandingTildeInPath
+		let data: Data
+		if FileManager.default.fileExists(atPath: expanded), let fileData = try? Data(contentsOf: URL(fileURLWithPath: expanded)) {
+			data = fileData
+		} else {
+			data = Data(argument.utf8)
+		}
+
+		guard let raw = try? JSONSerialization.jsonObject(with: data) else {
+			return []
+		}
+		let rawSteps: [[String: Any]]
+		if let steps = raw as? [[String: Any]] {
+			rawSteps = steps
+		} else if let object = raw as? [String: Any], let steps = object["steps"] as? [[String: Any]] {
+			rawSteps = steps
+		} else {
+			return []
+		}
+
+		return rawSteps.enumerated().map { index, raw in
+			let action = (raw["action"] as? String) ?? "delay"
+			let name = (raw["name"] as? String) ?? "\(index)-\(action)"
+			let delayMs = raw["delayMs"] as? Double
+			let delaySeconds = raw["delaySeconds"] as? Double
+			let timeoutSeconds = raw["timeoutSeconds"] as? Double
+			return FourADScriptStep(
+				action: action,
+				name: name,
+				key: raw["key"] as? String,
+				text: raw["text"] as? String,
+				delay: TimeInterval(delaySeconds ?? ((delayMs ?? 0.0) / 1000.0)),
+				timeout: TimeInterval(timeoutSeconds ?? 20.0),
+				snapshot: raw["snapshot"] as? String,
+				expect: (raw["expect"] as? [String: Any]) ?? [:])
+		}
+	}
+
 	private static func parseFourADArtifactOptions(arguments: [String]) -> FourADArtifactOptions? {
 		guard let directoryArgument = fourADArgumentValue("--fourad-artifact-dir", arguments: arguments) else {
 			return nil
@@ -319,13 +391,17 @@ class MachineDocument:
 		let bootCommand = fourADArgumentValue("--fourad-boot-command", arguments: arguments)
 		let keysArgument = fourADArgumentValue("--fourad-keys", arguments: arguments) ?? ""
 		let keys = keysArgument.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+		let scriptSteps = parseFourADScriptSteps(fourADArgumentValue("--fourad-script", arguments: arguments))
 
 		return FourADArtifactOptions(
 			directory: URL(fileURLWithPath: directoryPath),
 			bootDelay: bootDelay,
 			bootCommand: bootCommand,
 			keys: keys,
-			quitAfterArtifact: arguments.contains("--fourad-quit-after-artifact"))
+			scriptSteps: scriptSteps,
+			quitAfterArtifact: arguments.contains("--fourad-quit-after-artifact"),
+			failFast: arguments.contains("--fourad-fail-fast"),
+			diskSnapshot: arguments.contains("--fourad-disk-snapshot"))
 	}
 
 	private func scheduleFourADArtifactExportIfNeeded() {
@@ -335,7 +411,7 @@ class MachineDocument:
 		fourADArtifactScheduled = true
 		writeFourADArtifactState("scheduled export after \(options.bootDelay)s", to: options.directory)
 
-		if let bootCommand = options.bootCommand {
+		if let bootCommand = options.bootCommand, options.scriptSteps.isEmpty {
 			DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
 				self?.writeFourADArtifactState("typing boot command", to: options.directory)
 				self?.machine.paste(bootCommand)
@@ -343,14 +419,23 @@ class MachineDocument:
 		}
 
 		DispatchQueue.main.asyncAfter(deadline: .now() + options.bootDelay) { [weak self] in
-			self?.writeFourADArtifactState("starting export", to: options.directory)
-			self?.exportFourADArtifacts(options: options)
+			guard let self = self else { return }
+			if options.scriptSteps.isEmpty {
+				self.writeFourADArtifactState("starting export", to: options.directory)
+				self.exportFourADArtifacts(options: options)
+			} else {
+				self.writeFourADArtifactState("starting scripted automation", to: options.directory)
+				self.runFourADScript(options: options, index: 0)
+			}
 		}
 	}
 
 	private func exportFourADArtifacts(options: FourADArtifactOptions) {
 		do {
 			try FileManager.default.createDirectory(at: options.directory, withIntermediateDirectories: true, attributes: nil)
+			if options.diskSnapshot {
+				writeFourADDiskCatalog(to: options.directory)
+			}
 			try exportFourADSnapshot(
 				to: options.directory,
 				screenshotName: "screen.png",
@@ -410,21 +495,336 @@ class MachineDocument:
 		}
 	}
 
+	private func pressFourADKey(_ key: String, completion: @escaping () -> Void) {
+		guard let keyInfo = fourADKeyInfo(for: key) else {
+			writeFourADArtifactState("ignored unknown key \(key)", to: fourADArtifactOptions?.directory ?? URL(fileURLWithPath: "/tmp"))
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: completion)
+			return
+		}
+		machine.inputMode = .keyboardLogical
+		DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+			self?.writeFourADArtifactState("key down \(key)", to: self?.fourADArtifactOptions?.directory ?? URL(fileURLWithPath: "/tmp"))
+			self?.machine.setKey(keyInfo.keyCode, characters: keyInfo.characters, isPressed: true, isRepeat: false)
+		}
+		DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+			self?.writeFourADArtifactState("key up \(key)", to: self?.fourADArtifactOptions?.directory ?? URL(fileURLWithPath: "/tmp"))
+			self?.machine.setKey(keyInfo.keyCode, characters: keyInfo.characters, isPressed: false, isRepeat: false)
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: completion)
+		}
+	}
+
+	private func typeFourADTextAsKeys(_ text: String, completion: @escaping () -> Void) -> Bool {
+		var keys: [String] = []
+		for character in text {
+			if character == "\r" || character == "\n" {
+				keys.append("return")
+			} else if character == " " {
+				keys.append("space")
+			} else {
+				keys.append(String(character))
+			}
+		}
+		guard !keys.isEmpty, keys.allSatisfy({ fourADKeyInfo(for: $0) != nil }) else {
+			return false
+		}
+		func press(index: Int) {
+			if index >= keys.count {
+				completion()
+				return
+			}
+			pressFourADKey(keys[index]) {
+				press(index: index + 1)
+			}
+		}
+		press(index: 0)
+		return true
+	}
+
+	private func pasteFourADTextSlowly(_ text: String, interval: TimeInterval = 0.12, completion: @escaping () -> Void) {
+		let characters = Array(text)
+		func paste(index: Int) {
+			if index >= characters.count {
+				completion()
+				return
+			}
+			let character = characters[index]
+			let chunk = (character == "\n") ? "\r" : String(character)
+			machine.paste(chunk)
+			DispatchQueue.main.asyncAfter(deadline: .now() + interval) {
+				paste(index: index + 1)
+			}
+		}
+		paste(index: 0)
+	}
+
+	private func runFourADScript(options: FourADArtifactOptions, index: Int) {
+		if index >= options.scriptSteps.count {
+			finishFourADScript(options: options)
+			return
+		}
+
+		let step = options.scriptSteps[index]
+		fourADAutomationStepIndex = index
+		fourADAutomationStepName = step.name
+		fourADAutomationLastResult = "running"
+		writeFourADArtifactState("script step \(index): \(step.name) [\(step.action)]", to: options.directory)
+
+		let continueScript = { [weak self] in
+			self?.fourADAutomationLastResult = "ok"
+			self?.runFourADScript(options: options, index: index + 1)
+		}
+
+		switch step.action.lowercased() {
+			case "boot":
+				let text = step.text ?? options.bootCommand ?? "*EXEC !BOOT\n"
+				writeFourADArtifactState("boot command \(text.replacingOccurrences(of: "\n", with: "\\n"))", to: options.directory)
+				let command = text.replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: "")
+				machine.paste(command)
+				DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+					self?.pressFourADKey("return") {
+						DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.5), execute: continueScript)
+					}
+				}
+			case "type":
+				let text = step.text ?? ""
+				machine.paste(text)
+				DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.2), execute: continueScript)
+			case "typekeys":
+				let text = step.text ?? ""
+				if !typeFourADTextAsKeys(text, completion: {
+					DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.2), execute: continueScript)
+				}) {
+					writeFourADArtifactState("ignored unsupported typeKeys text \(text)", to: options.directory)
+					DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.2), execute: continueScript)
+				}
+			case "key":
+				pressFourADKey(step.key ?? "") {
+					DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.0), execute: continueScript)
+				}
+			case "delay":
+				DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.1), execute: continueScript)
+			case "waitfor":
+				waitForFourADCondition(step: step, options: options) { [weak self] ok in
+					if ok {
+						continueScript()
+					} else {
+						self?.fourADAutomationLastResult = "timeout"
+						self?.writeFourADArtifactState("script wait timed out: \(step.name)", to: options.directory)
+						try? self?.exportFourADSnapshot(
+							to: options.directory,
+							screenshotName: "wait-failed.png",
+							debugName: "wait-failed-debug.json",
+							textName: "wait-failed-screen-text.txt")
+						if options.quitAfterArtifact {
+							NSApp.terminate(self)
+						}
+					}
+				}
+			case "snapshot":
+				let name = sanitizeFourADFileStem(step.snapshot ?? step.name)
+				let files = fourADSnapshotFilenames(for: name)
+				try? exportFourADSnapshot(
+					to: options.directory,
+					screenshotName: files.screenshot,
+					debugName: files.debug,
+					textName: files.text)
+				DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.1), execute: continueScript)
+			case "diskcatalog":
+				writeFourADDiskCatalog(to: options.directory)
+				DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.1), execute: continueScript)
+			case "quit":
+				finishFourADScript(options: options)
+			default:
+				writeFourADArtifactState("ignored unknown script action \(step.action)", to: options.directory)
+				DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: continueScript)
+		}
+	}
+
+	private func finishFourADScript(options: FourADArtifactOptions) {
+		fourADAutomationStepIndex = options.scriptSteps.count
+		fourADAutomationStepName = "complete"
+		fourADAutomationLastResult = "ok"
+		do {
+			if options.diskSnapshot {
+				writeFourADDiskCatalog(to: options.directory)
+			}
+			try exportFourADSnapshot(
+				to: options.directory,
+				screenshotName: "after-keys.png",
+				debugName: "after-keys-debug.json",
+				textName: "after-keys-screen-text.txt")
+			writeFourADArtifactState("script complete; wrote final snapshot", to: options.directory)
+		} catch {
+			writeFourADExportError(error, to: options.directory)
+		}
+		if options.quitAfterArtifact {
+			NSApp.terminate(self)
+		}
+	}
+
+	private func waitForFourADCondition(step: FourADScriptStep, options: FourADArtifactOptions, completion: @escaping (Bool) -> Void) {
+		let deadline = Date().addingTimeInterval(step.timeout)
+		func poll() {
+			if self.fourADConditionMatches(step.expect, artifactDirectory: options.directory) {
+				self.writeFourADArtifactState("wait matched: \(step.name)", to: options.directory)
+				completion(true)
+				return
+			}
+			if Date() >= deadline {
+				completion(false)
+				return
+			}
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: poll)
+		}
+		poll()
+	}
+
+	private func fourADConditionMatches(_ expect: [String: Any], artifactDirectory: URL) -> Bool {
+		guard let snapshot = self.machine.electronDebugSnapshot() as? [String: Any] else {
+			return false
+		}
+		let screenText = (snapshot["screenText"] as? String) ?? ""
+		let basicError = (snapshot["basicError"] as? String) ?? ""
+		if let noBasicError = expect["noBasicError"] as? Bool, noBasicError, !basicError.isEmpty {
+			return false
+		}
+		if let expectedBasicError = expect["basicError"] {
+			if let bool = expectedBasicError as? Bool {
+				if bool != !basicError.isEmpty { return false }
+			} else if let text = expectedBasicError as? String, !basicError.contains(text) {
+				return false
+			}
+		}
+		if let token = expect["screenContains"] as? String, !screenText.uppercased().contains(token.uppercased()) {
+			return false
+		}
+		if let tokens = expect["screenContains"] as? [String] {
+			for token in tokens where !screenText.uppercased().contains(token.uppercased()) {
+				return false
+			}
+		}
+		if let token = expect["screenContainsAny"] as? String, !screenText.uppercased().contains(token.uppercased()) {
+			return false
+		}
+		if let tokens = expect["screenContainsAny"] as? [String], !tokens.contains(where: { screenText.uppercased().contains($0.uppercased()) }) {
+			return false
+		}
+		if let value = numberValue(expect["himem"]), numberValue(snapshot["himem"]) != value {
+			return false
+		}
+		if let minimum = numberValue(expect["freeBytesAtLeast"]), (numberValue(snapshot["freeBytes"]) ?? -1) < minimum {
+			return false
+		}
+		if let minimum = numberValue(expect["hopAtLeast"]), (numberValue(snapshot["hopCount"]) ?? -1) < minimum {
+			return false
+		}
+		if let value = numberValue(expect["gameState"]), numberValue((snapshot["resident"] as? [String: Any])?["N"]) != value {
+			return false
+		}
+		if let value = numberValue(expect["nextMod"]), numberValue((snapshot["resident"] as? [String: Any])?["L"]) != value {
+			return false
+		}
+		if !residentConditionMatches(expect["resident"] as? [String: Any], snapshot: snapshot, minimum: false) {
+			return false
+		}
+		if !residentConditionMatches(expect["residentAtLeast"] as? [String: Any], snapshot: snapshot, minimum: true) {
+			return false
+		}
+		if let token = expect["diskContains"] as? String {
+			writeFourADDiskCatalog(to: artifactDirectory)
+			let path = artifactDirectory.appendingPathComponent("disk-catalog.txt")
+			let catalog = (try? String(contentsOf: path, encoding: .utf8)) ?? ""
+			if !catalog.contains(token) {
+				return false
+			}
+		}
+		return true
+	}
+
+	private func residentConditionMatches(_ condition: [String: Any]?, snapshot: [String: Any], minimum: Bool) -> Bool {
+		guard let condition = condition else {
+			return true
+		}
+		let resident = (snapshot["resident"] as? [String: Any]) ?? [:]
+		for (key, expected) in condition {
+			guard let actualNumber = numberValue(resident[key]), let expectedNumber = numberValue(expected) else {
+				return false
+			}
+			if minimum {
+				if actualNumber < expectedNumber { return false }
+			} else if actualNumber != expectedNumber {
+				return false
+			}
+		}
+		return true
+	}
+
+	private func numberValue(_ value: Any?) -> Double? {
+		if let number = value as? NSNumber {
+			return number.doubleValue
+		}
+		if let int = value as? Int {
+			return Double(int)
+		}
+		if let double = value as? Double {
+			return double
+		}
+		if let string = value as? String {
+			return Double(string)
+		}
+		return nil
+	}
+
+	private func sanitizeFourADFileStem(_ raw: String) -> String {
+		let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+		let scalars = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+		let out = String(scalars)
+		return out.isEmpty ? "snapshot" : out
+	}
+
+	private func fourADSnapshotFilenames(for name: String) -> (screenshot: String, debug: String, text: String) {
+		if name == "screen" {
+			return ("screen.png", "debug.json", "screen-text.txt")
+		}
+		if name == "after-keys" {
+			return ("after-keys.png", "after-keys-debug.json", "after-keys-screen-text.txt")
+		}
+		return ("\(name).png", "\(name)-debug.json", "\(name)-screen-text.txt")
+	}
+
 	private func fourADKeyInfo(for key: String) -> (keyCode: UInt16, characters: String)? {
 		switch key.lowercased() {
 			case "w": return (UInt16(VK_ANSI_W), "w")
 			case "a": return (UInt16(VK_ANSI_A), "a")
 			case "s": return (UInt16(VK_ANSI_S), "s")
 			case "d": return (UInt16(VK_ANSI_D), "d")
+			case "b": return (UInt16(VK_ANSI_B), "b")
+			case "c": return (UInt16(VK_ANSI_C), "c")
+			case "e": return (UInt16(VK_ANSI_E), "e")
 			case "r": return (UInt16(VK_ANSI_R), "r")
+			case "t": return (UInt16(VK_ANSI_T), "t")
+			case "x": return (UInt16(VK_ANSI_X), "x")
 			case "m": return (UInt16(VK_ANSI_M), "m")
 			case "g": return (UInt16(VK_ANSI_G), "g")
 			case "f": return (UInt16(VK_ANSI_F), "f")
 			case "l": return (UInt16(VK_ANSI_L), "l")
 			case "q": return (UInt16(VK_ANSI_Q), "q")
+			case "n": return (UInt16(VK_ANSI_N), "n")
+			case "o": return (UInt16(VK_ANSI_O), "o")
+			case "enter", "return": return (UInt16(36), "\r")
 			case "1": return (UInt16(VK_ANSI_1), "1")
 			case "2": return (UInt16(VK_ANSI_2), "2")
 			case "3": return (UInt16(VK_ANSI_3), "3")
+			case "4": return (UInt16(VK_ANSI_4), "4")
+			case "5": return (UInt16(VK_ANSI_5), "5")
+			case "6": return (UInt16(VK_ANSI_6), "6")
+			case "7": return (UInt16(VK_ANSI_7), "7")
+			case "8": return (UInt16(VK_ANSI_8), "8")
+			case "9": return (UInt16(VK_ANSI_9), "9")
+			case "0": return (UInt16(VK_ANSI_0), "0")
+			case "space": return (UInt16(49), " ")
+			case "*": return (UInt16(VK_ANSI_8), "*")
+			case "!": return (UInt16(VK_ANSI_1), "!")
 			default: return nil
 		}
 	}
@@ -437,7 +837,13 @@ class MachineDocument:
 		try pngData.write(to: directory.appendingPathComponent(screenshotName))
 
 		let rawSnapshot = self.machine.electronDebugSnapshot() as? [String: Any]
-		let snapshot = sanitizeFourADSnapshot(rawSnapshot ?? ["error": "Electron debug snapshot unavailable"])
+		var snapshot = sanitizeFourADSnapshot(rawSnapshot ?? ["error": "Electron debug snapshot unavailable"])
+		snapshot["fourADHarnessVersion"] = 2
+		snapshot["fourADAutomation"] = [
+			"stepIndex": fourADAutomationStepIndex,
+			"stepName": fourADAutomationStepName,
+			"lastResult": fourADAutomationLastResult,
+		]
 		let jsonData = try JSONSerialization.data(withJSONObject: snapshot, options: [.prettyPrinted])
 		try jsonData.write(to: directory.appendingPathComponent(debugName))
 
@@ -479,6 +885,28 @@ class MachineDocument:
 		} else {
 			try? data.write(to: logURL)
 		}
+	}
+
+	private func writeFourADDiskCatalog(to directory: URL) {
+		let manifestPath = directory.appendingPathComponent("manifest.json")
+		guard let manifestData = try? Data(contentsOf: manifestPath),
+			let manifest = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+			let diskPath = manifest["disk"] as? String else {
+			return
+		}
+		let beebtools = NSHomeDirectory() + "/.local/bin/beebtools"
+		guard FileManager.default.fileExists(atPath: beebtools) else {
+			return
+		}
+		let process = Process()
+		process.executableURL = URL(fileURLWithPath: beebtools)
+		process.arguments = ["cat", diskPath]
+		let pipe = Pipe()
+		process.standardOutput = pipe
+		try? process.run()
+		process.waitUntilExit()
+		let data = pipe.fileHandleForReading.readDataToEndOfFile()
+		try? data.write(to: directory.appendingPathComponent("disk-catalog.txt"))
 	}
 
 	func machineSpeakerDidChangeInputClock(_ machine: CSMachine) {
@@ -568,6 +996,7 @@ class MachineDocument:
 	func insertFourADMedia(_ URL: URL) {
 		pendingFourADMediaURL = URL
 		applyPendingFourADMediaIfNeeded()
+		scheduleFourADInteractiveBootIfNeeded()
 	}
 
 	private func applyPendingFourADMediaIfNeeded() {
@@ -579,6 +1008,60 @@ class MachineDocument:
 		if !mediaSet.empty {
 			mediaSet.apply(to: self.machine)
 			pendingFourADMediaURL = nil
+		}
+	}
+
+	private func scheduleFourADInteractiveBootIfNeeded() {
+		guard fourADArtifactOptions == nil else {
+			return
+		}
+		guard fourADAutoBoot || fourADInteractiveBootCommand != nil else {
+			return
+		}
+		let bootCommand = fourADInteractiveBootCommand ?? "*EXEC !BOOT\n"
+		DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+			self?.machine.paste(bootCommand)
+		}
+	}
+
+	private func scheduleFourADFailFastIfNeeded() {
+		let failFast = fourADArtifactOptions?.failFast ?? ProcessInfo.processInfo.arguments.contains("--fourad-fail-fast")
+		guard failFast else {
+			return
+		}
+		fourADFailFastTimer?.invalidate()
+		fourADFailFastTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+			self?.checkFourADFailFast()
+		}
+	}
+
+	private func checkFourADFailFast() {
+		guard let snapshot = self.machine.electronDebugSnapshot() as? [String: Any] else {
+			return
+		}
+		let basicError = (snapshot["basicError"] as? String) ?? ""
+		let screenText = (snapshot["screenText"] as? String) ?? ""
+		let needles = ["No such variable", "Bad program", "Bad MODE", "Syntax error", "Mistake", "Type mismatch"]
+		let matched = !basicError.isEmpty || needles.contains(where: { screenText.contains($0) })
+		guard matched else {
+			return
+		}
+		fourADFailFastTimer?.invalidate()
+		fourADFailFastTimer = nil
+		if let options = fourADArtifactOptions {
+			do {
+				try exportFourADSnapshot(
+					to: options.directory,
+					screenshotName: "fail-fast.png",
+					debugName: "fail-fast-debug.json",
+					textName: "fail-fast-screen-text.txt")
+				writeFourADArtifactState("fail-fast BASIC error export", to: options.directory)
+			} catch {
+				writeFourADExportError(error, to: options.directory)
+			}
+			if options.quitAfterArtifact {
+				NSApp.terminate(self)
+			}
 		}
 	}
 

@@ -248,6 +248,41 @@ public:
 		return out;
 	}
 
+	// BBC BASIC resident integer variables A%..Z% (4 bytes each from &404).
+	inline int32_t read_resident_int(const uint8_t *ram, const char letter) const {
+		if(!ram || letter < 'A' || letter > 'Z') return 0;
+		const uint16_t addr = uint16_t(0x404 + (letter - 'A') * 4);
+		if(addr + 3 >= 0x8000) return 0;
+		const uint32_t raw =
+			uint32_t(ram[addr]) |
+			(uint32_t(ram[addr + 1]) << 8) |
+			(uint32_t(ram[addr + 2]) << 16) |
+			(uint32_t(ram[addr + 3]) << 24);
+		return int32_t(raw);
+	}
+
+	inline std::string find_basic_error(const std::string &screen) const {
+		static const char *const needles[] = {
+			"No such variable",
+			"Bad program",
+			"Bad MODE",
+			"Syntax error",
+			"Mistake",
+			"Type mismatch",
+			"Division by zero",
+			"Out of memory",
+		};
+		for(const char *needle : needles) {
+			if(screen.find(needle) != std::string::npos) {
+				const auto start = screen.find(needle);
+				auto end = screen.find('\n', start);
+				if(end == std::string::npos) end = screen.size();
+				return screen.substr(start, end - start);
+			}
+		}
+		return {};
+	}
+
 private:
 	std::set<uint16_t> breakpoints_;
 };

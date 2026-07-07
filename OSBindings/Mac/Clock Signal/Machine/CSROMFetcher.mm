@@ -8,6 +8,7 @@
 
 #import <Foundation/Foundation.h>
 #include "CSROMFetcher.hpp"
+#import "CSElectronDebug.h"
 
 #import "NSBundle+DataResource.h"
 #import "NSData+StdVector.h"
@@ -79,6 +80,24 @@ ROMMachine::ROMFetcher CSROMFetcher(ROM::Request *missing) {
 			for(const auto &file_name: description.file_names) {
 				NSData *fileData;
 
+				// 4AD: project ROMImages root (--fourad-rom-path) takes priority.
+				if(!fileData) {
+					NSString *const root = CSFourADROMImagesRoot();
+					if(root) {
+						NSURL *const fileURL = [[[NSURL fileURLWithPath:root isDirectory:YES]
+							URLByAppendingPathComponent:[NSString stringWithUTF8String:description.machine_name.c_str()] isDirectory:YES]
+							URLByAppendingPathComponent:[NSString stringWithUTF8String:file_name.c_str()]];
+						fileData = [NSData dataWithContentsOfURL:fileURL];
+						// Shared Acorn BASIC ROM often lives under ROMImages/Acorn/.
+						if(!fileData && strcmp(description.machine_name.c_str(), "Electron") == 0) {
+							NSURL *const acornURL = [[[NSURL fileURLWithPath:root isDirectory:YES]
+								URLByAppendingPathComponent:@"Acorn" isDirectory:YES]
+								URLByAppendingPathComponent:[NSString stringWithUTF8String:file_name.c_str()]];
+							fileData = [NSData dataWithContentsOfURL:acornURL];
+						}
+					}
+				}
+
 				// Check for this file first within the application support directories.
 				for(NSURL *fileURL in urlsFor(description, file_name)) {
 					fileData = [NSData dataWithContentsOfURL:fileURL];
@@ -91,6 +110,14 @@ ROMMachine::ROMFetcher CSROMFetcher(ROM::Request *missing) {
 						dataForResource:[NSString stringWithUTF8String:file_name.c_str()]
 						withExtension:nil
 						subdirectory:directoryFor(description)];
+				}
+
+				// 4AD: Electron may reuse ROMImages/Acorn/basic.rom from the bundle.
+				if(!fileData && strcmp(description.machine_name.c_str(), "Electron") == 0) {
+					fileData = [[NSBundle mainBundle]
+						dataForResource:[NSString stringWithUTF8String:file_name.c_str()]
+						withExtension:nil
+						subdirectory:@"ROMImages/Acorn"];
 				}
 
 				// Store an appropriate result.
