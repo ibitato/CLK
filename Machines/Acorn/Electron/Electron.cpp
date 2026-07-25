@@ -873,6 +873,14 @@ private:
 		return debug_.read_ram(ram_, address, length);
 	}
 
+	int32_t debug_read_resident(const char letter) final {
+		return debug_.read_resident_int(ram_, letter);
+	}
+
+	bool debug_set_resident(const char letter, const int32_t value) final {
+		return debug_.write_resident_int(ram_, letter, value);
+	}
+
 	// MARK: - Caps Lock status and the activity observer.
 	static inline const std::string caps_led = "CAPS";
 	bool caps_led_state_ = false;

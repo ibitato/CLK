@@ -261,6 +261,18 @@ public:
 		return int32_t(raw);
 	}
 
+	inline bool write_resident_int(uint8_t *ram, const char letter, const int32_t value) const {
+		if(!ram || letter < 'A' || letter > 'Z') return false;
+		const uint16_t addr = uint16_t(0x404 + (letter - 'A') * 4);
+		if(addr + 3 >= 0x8000) return false;
+		const uint32_t raw = uint32_t(value);
+		ram[addr] = uint8_t(raw & 0xff);
+		ram[addr + 1] = uint8_t((raw >> 8) & 0xff);
+		ram[addr + 2] = uint8_t((raw >> 16) & 0xff);
+		ram[addr + 3] = uint8_t((raw >> 24) & 0xff);
+		return true;
+	}
+
 	inline std::string find_basic_error(const std::string &screen) const {
 		static const char *const needles[] = {
 			"No such variable",

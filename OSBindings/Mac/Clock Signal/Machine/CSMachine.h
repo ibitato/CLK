@@ -139,5 +139,6 @@ typedef NS_ENUM(NSInteger, CSMachineChangeEffect) {
 - (void)electronDebugAddBreakpoint:(uint16_t)address;
 - (void)electronDebugClearBreakpoints;
 - (void)electronDebugSetTrapBrk:(BOOL)enabled;
+- (BOOL)electronDebugSetResidentLetter:(unichar)letter value:(int32_t)value;
 
 @end

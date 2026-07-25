@@ -26,6 +26,8 @@
 #include "ClockReceiver/ScanSynchroniser.hpp"
 #include "Concurrency/AsyncTaskQueue.hpp"
 
+#include <cctype>
+
 #import "CSStaticAnalyser+TargetVector.h"
 #import "NSBundle+DataResource.h"
 #import "NSData+StdVector.h"
@@ -787,23 +789,28 @@ struct ActivityObserver: public Activity::Observer {
 			@"disassembly": [NSString stringWithUTF8String:snap.disassembly.c_str()],
 			@"screenText": [NSString stringWithUTF8String:snap.screen_text.c_str()],
 			@"basicError": snap.basic_error.empty() ? @"" : [NSString stringWithUTF8String:snap.basic_error.c_str()],
-			@"resident": @{
-				@"H": @(snap.resident_H),
-				@"I": @(snap.resident_I),
-				@"J": @(snap.resident_J),
-				@"K": @(snap.resident_K),
-				@"L": @(snap.resident_L),
-				@"M": @(snap.resident_M),
-				@"N": @(snap.resident_N),
-				@"O": @(snap.resident_O),
-				@"P": @(snap.resident_P),
-				@"Q": @(snap.resident_Q),
-				@"R": @(snap.resident_R),
-				@"S": @(snap.resident_S),
-			},
+			@"resident": [self electronResidentDictionary:electron],
 			@"hopCount": @(snap.resident_H),
 			@"memoryDump": [NSData dataWithBytes:snap.memory_dump.data() length:snap.memory_dump.size()]
 		};
+	}
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)electronResidentDictionary:(Electron::Machine *)electron {
+	NSMutableDictionary<NSString *, NSNumber *> *resident = [NSMutableDictionary dictionaryWithCapacity:26];
+	for(char letter = 'A'; letter <= 'Z'; letter++) {
+		const int32_t value = electron->debug_read_resident(letter);
+		resident[[NSString stringWithFormat:@"%c", letter]] = @(value);
+	}
+	return resident;
+}
+
+- (BOOL)electronDebugSetResidentLetter:(unichar)letter value:(int32_t)value {
+	@synchronized(self) {
+		Electron::Machine *electron = [self electronMachine];
+		if(!electron || !electron->debug_available()) return NO;
+		const char upper = char(toupper(letter));
+		return electron->debug_set_resident(upper, value) ? YES : NO;
 	}
 }
 

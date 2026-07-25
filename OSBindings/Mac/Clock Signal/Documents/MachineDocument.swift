@@ -50,6 +50,8 @@ class MachineDocument:
 		let name: String
 		let key: String?
 		let text: String?
+		let letter: String?
+		let value: Int32?
 		let delay: TimeInterval
 		let timeout: TimeInterval
 		let snapshot: String?
@@ -368,11 +370,23 @@ class MachineDocument:
 			let delayMs = raw["delayMs"] as? Double
 			let delaySeconds = raw["delaySeconds"] as? Double
 			let timeoutSeconds = raw["timeoutSeconds"] as? Double
+			let letter = raw["letter"] as? String
+			let rawValue = raw["value"]
+			let residentValue: Int32?
+			if let number = rawValue as? NSNumber {
+				residentValue = number.int32Value
+			} else if let intValue = rawValue as? Int {
+				residentValue = Int32(intValue)
+			} else {
+				residentValue = nil
+			}
 			return FourADScriptStep(
 				action: action,
 				name: name,
 				key: raw["key"] as? String,
 				text: raw["text"] as? String,
+				letter: letter,
+				value: residentValue,
 				delay: TimeInterval(delaySeconds ?? ((delayMs ?? 0.0) / 1000.0)),
 				timeout: TimeInterval(timeoutSeconds ?? 20.0),
 				snapshot: raw["snapshot"] as? String,
@@ -414,7 +428,7 @@ class MachineDocument:
 		if let bootCommand = options.bootCommand, options.scriptSteps.isEmpty {
 			DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
 				self?.writeFourADArtifactState("typing boot command", to: options.directory)
-				self?.machine.paste(bootCommand)
+				self?.pasteFourADBootCommand(bootCommand) {}
 			}
 		}
 
@@ -557,6 +571,26 @@ class MachineDocument:
 		paste(index: 0)
 	}
 
+	/// Paste `*EXEC !BOOT` reliably on Electron.
+	/// Per-character paste can drop the leading `*` or one `O` from `BOOT`.
+	/// Split so `*` is in the first chunk and the doubled `O` is across a gap
+	/// (`!BO` + pause + `OT`).
+	private func pasteFourADBootCommand(_ text: String, completion: @escaping () -> Void) {
+		let normalized = text.replacingOccurrences(of: "\n", with: "\r")
+		guard let marker = normalized.range(of: "!BO") else {
+			machine.paste(normalized)
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: completion)
+			return
+		}
+		let head = String(normalized[..<marker.upperBound]) // ...!BO
+		let tail = String(normalized[marker.upperBound...]) // OT...
+		machine.paste(head)
+		DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+			self?.machine.paste(tail)
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: completion)
+		}
+	}
+
 	private func runFourADScript(options: FourADArtifactOptions, index: Int) {
 		if index >= options.scriptSteps.count {
 			finishFourADScript(options: options)
@@ -576,14 +610,12 @@ class MachineDocument:
 
 		switch step.action.lowercased() {
 			case "boot":
+				// Must be exactly *EXEC !BOOT — without '*', BASIC reports Mistake;
+				// with a dropped O it becomes *EXEC !BOT and DFS fails.
 				let text = step.text ?? options.bootCommand ?? "*EXEC !BOOT\n"
 				writeFourADArtifactState("boot command \(text.replacingOccurrences(of: "\n", with: "\\n"))", to: options.directory)
-				let command = text.replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: "")
-				machine.paste(command)
-				DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-					self?.pressFourADKey("return") {
-						DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.5), execute: continueScript)
-					}
+				pasteFourADBootCommand(text) {
+					DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 8.0), execute: continueScript)
 				}
 			case "type":
 				let text = step.text ?? ""
@@ -632,6 +664,20 @@ class MachineDocument:
 			case "diskcatalog":
 				writeFourADDiskCatalog(to: options.directory)
 				DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.1), execute: continueScript)
+			case "setresident":
+				let letter = (step.letter ?? "").uppercased()
+				let value = step.value ?? 0
+				if let scalar = letter.unicodeScalars.first, CharacterSet.uppercaseLetters.contains(scalar) {
+					let ok = machine.electronDebugSetResidentLetter(unichar(scalar.value), value: value)
+					writeFourADArtifactState(
+						ok
+							? "setResident \(letter)%=\(value)"
+							: "setResident failed \(letter)%=\(value)",
+						to: options.directory)
+				} else {
+					writeFourADArtifactState("ignored invalid setResident letter \(step.letter ?? "")", to: options.directory)
+				}
+				DispatchQueue.main.asyncAfter(deadline: .now() + max(step.delay, 0.05), execute: continueScript)
 			case "quit":
 				finishFourADScript(options: options)
 			default:
@@ -838,7 +884,7 @@ class MachineDocument:
 
 		let rawSnapshot = self.machine.electronDebugSnapshot() as? [String: Any]
 		var snapshot = sanitizeFourADSnapshot(rawSnapshot ?? ["error": "Electron debug snapshot unavailable"])
-		snapshot["fourADHarnessVersion"] = 2
+		snapshot["fourADHarnessVersion"] = 3
 		snapshot["fourADAutomation"] = [
 			"stepIndex": fourADAutomationStepIndex,
 			"stepName": fourADAutomationStepName,
@@ -1020,7 +1066,7 @@ class MachineDocument:
 		}
 		let bootCommand = fourADInteractiveBootCommand ?? "*EXEC !BOOT\n"
 		DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-			self?.machine.paste(bootCommand)
+			self?.pasteFourADBootCommand(bootCommand) {}
 		}
 	}
 
@@ -1041,7 +1087,7 @@ class MachineDocument:
 		}
 		let basicError = (snapshot["basicError"] as? String) ?? ""
 		let screenText = (snapshot["screenText"] as? String) ?? ""
-		let needles = ["No such variable", "Bad program", "Bad MODE", "Syntax error", "Mistake", "Type mismatch"]
+		let needles = ["No such variable", "Bad program", "Bad MODE", "Syntax error", "Mistake", "Type mismatch", "File not found"]
 		let matched = !basicError.isEmpty || needles.contains(where: { screenText.contains($0) })
 		guard matched else {
 			return

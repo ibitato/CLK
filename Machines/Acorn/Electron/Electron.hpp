@@ -67,6 +67,12 @@ struct Machine {
 	virtual std::vector<uint8_t> debug_read_memory(uint16_t address, std::size_t length) {
 		(void)address; (void)length; return {};
 	}
+	virtual int32_t debug_read_resident(char letter) {
+		(void)letter; return 0;
+	}
+	virtual bool debug_set_resident(char letter, int32_t value) {
+		(void)letter; (void)value; return false;
+	}
 
 	/// Creates and returns an Electron.
 	static std::unique_ptr<Machine> create(const Analyser::Static::Target &, const ROMMachine::ROMFetcher &);
